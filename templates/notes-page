@@ -1,0 +1,257 @@
+<?php
+// Check user capabilities
+if (!current_user_can('support') && !current_user_can('administrator')) {
+    wp_die(__('You do not have sufficient permissions to access this page.'));
+}
+?>
+<div class="wrap">
+    <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+
+    <div id="crg-notes-app">
+        <div id="crg-notes-list">
+            <!-- Notes list will be populated here via JavaScript -->
+        </div>
+
+        <div id="crg-note-editor">
+            <textarea id="crg-note-content"></textarea>
+            <button id="crg-save-note" class="button button-primary">Save Note</button>
+            <button id="crg-enable-edit" class="button">Enable Editing</button>
+        </div>
+
+        <?php if (current_user_can('administrator')): ?>
+        <div id="crg-note-author"></div>
+        <div id="crg-note-history">
+            <h3>Note History</h3>
+            <div id="crg-note-diff"></div>
+        </div>
+        <?php endif; ?>
+    </div>
+
+    <style>
+        #crg-notes-app {
+            display: flex;
+            margin-top: 20px;
+        }
+        #crg-notes-list {
+            width: 30%;
+            margin-right: 20px;
+        }
+        #crg-note-editor {
+            width: 40%;
+        }
+        #crg-note-history {
+            width: 30%;
+            margin-left: 20px;
+        }
+        .note-item {
+            cursor: pointer;
+            padding: 10px;
+            border: 1px solid #ddd;
+            margin-bottom: 10px;
+        }
+        .note-item:hover {
+            background-color: #f5f5f5;
+        }
+        #crg-note-content {
+            width: 100%;
+            height: 300px;
+        }
+        #crg-save-note {
+            margin-top: 10px;
+        }
+        #crg-note-diff pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</div>
+
+<script>
+jQuery(document).ready(function($) {
+    var currentNoteId = 0;
+    var userRoles = <?php echo json_encode(wp_get_current_user()->roles); ?>;
+
+    console.log('User roles:', userRoles);
+
+    function hasRole(role) {
+        return userRoles.indexOf(role) !== -1;
+    }
+
+    // Function to load notes
+    function loadNotes() {
+        console.log('Loading notes...');
+        $.ajax({
+            url: ajaxurl,
+            method: 'POST',
+            data: {
+                action: 'get_notes',
+                security: '<?php echo wp_create_nonce("crg_notes_nonce"); ?>'
+            },
+            success: function(response) {
+                console.log('Get notes response:', response);
+                if (response.success) {
+                    var notesList = $('#crg-notes-list');
+                    notesList.empty();
+                    $.each(response.data, function(index, note) {
+                        var deleteButton = hasRole('administrator') ? '<button class="delete-note" data-id="' + note.id + '">Delete</button>' : '';
+                        notesList.append('<div class="note-item" data-id="' + note.id + '">' +
+                            '<h4>' + note.updated_at + '</h4>' +
+                            '<p>Author: ' + note.author + '</p>' +
+                            '<p>' + note.content.substring(0, 100) + '...</p>' +
+                            deleteButton +
+                            '</div>');
+                    });
+                } else {
+                    console.error('Failed to load notes:', response);
+                    alert('Failed to load notes. Please try again.');
+                }
+            },
+            error: function(jqXHR, textStatus, errorThrown) {
+                console.error('AJAX error in loadNotes:', textStatus, errorThrown);
+            }
+        });
+    }
+
+    // Function to delete a note
+    $(document).on('click', '.delete-note', function(e) {
+        e.stopPropagation(); // Prevent triggering note selection
+        var noteId = $(this).data('id');
+        console.log('Attempting to delete note:', noteId);
+        if (confirm('Are you sure you want to delete this note?')) {
+            $.ajax({
+                url: ajaxurl,
+                method: 'POST',
+                data: {
+                    action: 'delete_note',
+                    security: '<?php echo wp_create_nonce("crg_notes_nonce"); ?>',
+                    note_id: noteId
+                },
+                success: function(response) {
+                    console.log('Delete note response:', response);
+                    if (response.success) {
+                        loadNotes(); // Reload the notes list
+                        if (currentNoteId == noteId) {
+                            // Clear the editor if the deleted note was being edited
+                            $('#crg-note-content').val('').prop('readonly', false);
+                            $('#crg-note-author').text('');
+                            currentNoteId = 0;
+                            $('#crg-note-diff').html('');
+                        }
+                    } else {
+                        console.error('Failed to delete note:', response);
+                        alert('Failed to delete note. Please try again.');
+                    }
+                },
+                error: function(jqXHR, textStatus, errorThrown) {
+                    console.error('AJAX error in deleteNote:', textStatus, errorThrown);
+                }
+            });
+        }
+    });
+
+    // Function to save note
+    $('#crg-save-note').on('click', function() {
+        var content = $('#crg-note-content').val();
+        console.log('Attempting to save note. Content length:', content.length);
+        $.ajax({
+            url: ajaxurl,
+            method: 'POST',
+            data: {
+                action: 'save_note',
+                security: '<?php echo wp_create_nonce("crg_notes_nonce"); ?>',
+                note_id: currentNoteId,
+                content: content
+            },
+            success: function(response) {
+                console.log('Save note response:', response);
+                if (response.success) {
+                    alert('Note saved successfully!');
+                    loadNotes();
+                    currentNoteId = response.data.id;
+                    $('#crg-note-content').prop('readonly', true);
+                    if (hasRole('administrator')) {
+                        loadNoteHistory(currentNoteId);
+                    }
+                } else {
+                    console.error('Failed to save note:', response);
+                    alert('Failed to save note. Error: ' + response.data);
+                }
+            },
+            error: function(jqXHR, textStatus, errorThrown) {
+                console.error('AJAX error in saveNote:', textStatus, errorThrown);
+                alert('An error occurred while saving the note. Please check the console for more details.');
+            }
+        });
+    });
+
+    // Function to load a specific note
+    $(document).on('click', '.note-item', function() {
+        var noteId = $(this).data('id');
+        console.log('Loading note:', noteId);
+        $.ajax({
+            url: ajaxurl,
+            method: 'POST',
+            data: {
+                action: 'get_note',
+                security: '<?php echo wp_create_nonce("crg_notes_nonce"); ?>',
+                note_id: noteId
+            },
+            success: function(response) {
+                console.log('Get note response:', response);
+                if (response.success) {
+                    $('#crg-note-content').val(response.data.content).prop('readonly', true);
+                    $('#crg-note-author').text('Author: ' + response.data.author);
+                    currentNoteId = response.data.id;
+                    if (hasRole('administrator')) {
+                        loadNoteHistory(noteId);
+                    }
+                } else {
+                    console.error('Failed to load note:', response);
+                }
+            },
+            error: function(jqXHR, textStatus, errorThrown) {
+                console.error('AJAX error in loadNote:', textStatus, errorThrown);
+            }
+        });
+    });
+
+    // Function to enable editing
+    $('#crg-enable-edit').on('click', function() {
+        console.log('Enabling note editing');
+        $('#crg-note-content').prop('readonly', false);
+    });
+
+    // Function to load note history
+    function loadNoteHistory(noteId) {
+        console.log('Loading note history:', noteId);
+        $.ajax({
+            url: ajaxurl,
+            method: 'POST',
+            data: {
+                action: 'get_note_history',
+                security: '<?php echo wp_create_nonce("crg_notes_nonce"); ?>',
+                note_id: noteId
+            },
+            success: function(response) {
+                console.log('Get note history response:', response);
+                if (response.success) {
+                    var historyHtml = '';
+                    $.each(response.data, function(index, revision) {
+                        historyHtml += '<h4>Revision ' + revision.revision_id + ' - ' + revision.created_at + '</h4>';
+                        historyHtml += '<pre>' + revision.diff + '</pre>';
+                    });
+                    $('#crg-note-diff').html(historyHtml);
+                } else {
+                    console.error('Failed to load note history:', response);
+                }
+            },
+            error: function(jqXHR, textStatus, errorThrown) {
+                console.error('AJAX error in loadNoteHistory:', textStatus, errorThrown);
+            }
+        });
+    }
+
+    // Load notes on page load
+    loadNotes();
+});
+</script> 
